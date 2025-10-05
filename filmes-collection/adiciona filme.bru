@@ -1,0 +1,24 @@
+meta {
+  name: adiciona filme
+  type: http
+  seq: 4
+}
+
+post {
+  url: http://localhost:8080/filmes
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "id": 2,
+    "titulo": "Titanic",
+    "diretor": "James Cameron",
+    "anoLancamento": "1997"
+  }
+}
+
+settings {
+  encodeUrl: true
+}

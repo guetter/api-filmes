@@ -1,0 +1,28 @@
+meta {
+  name: deleta filme
+  type: http
+  seq: 6
+}
+
+delete {
+  url: http://localhost:8080/filmes/:id
+  body: none
+  auth: inherit
+}
+
+params:path {
+  id: 2
+}
+
+body:json {
+  {
+    "id": 2,
+    "titulo": "Titanic",
+    "diretor": "James Cameron",
+    "anoLancamento": "1997"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
