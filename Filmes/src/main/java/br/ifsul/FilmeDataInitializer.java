@@ -29,6 +29,7 @@ public class FilmeDataInitializer implements CommandLineRunner {
     private static final Logger LOGGER = LoggerFactory.getLogger(FilmeDataInitializer.class);
     private static final long TARGET_TOTAL = 1_000L;
     private static final Pattern YEAR_PATTERN = Pattern.compile("(\\d{4})");
+    private static final int MAX_API_CALLS = 1_000;
     private static final List<String> SEARCH_TERMS = List.of(
             "a", "e", "i", "o", "u",
             "man", "woman", "star", "love", "dark",
@@ -38,6 +39,8 @@ public class FilmeDataInitializer implements CommandLineRunner {
     private final FilmeRepository filmeRepository;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
+    private int apiCalls = 0;
+    private boolean limitLogEmitted = false;
 
     @Value("${omdb.api.url:https://www.omdbapi.com/}")
     private String omdbApiUrl;
@@ -75,6 +78,9 @@ public class FilmeDataInitializer implements CommandLineRunner {
             filmeRepository.saveAll(novosFilmes);
             LOGGER.info("Importados {} filmes da OMDb API. Total atual: {}", novosFilmes.size(),
                     filmeRepository.count());
+            if (limitReached()) {
+                LOGGER.warn("Limite de {} chamadas à OMDb atingido durante a importação.", MAX_API_CALLS);
+            }
         } catch (RestClientException | IOException e) {
             LOGGER.error("Falha ao importar filmes da OMDb API: {}", e.getMessage(), e);
         }
@@ -88,7 +94,13 @@ public class FilmeDataInitializer implements CommandLineRunner {
             if (acumulado.size() >= faltantes) {
                 break;
             }
+            if (limitReached()) {
+                break;
+            }
             for (int pagina = 1; pagina <= 10 && acumulado.size() < faltantes; pagina++) {
+                if (limitReached()) {
+                    break;
+                }
                 Optional<OmdbSearchResponse> resposta = buscarPagina(termo, pagina);
                 if (resposta.isEmpty()) {
                     break;
@@ -100,6 +112,9 @@ public class FilmeDataInitializer implements CommandLineRunner {
 
                 for (OmdbSearchMovie movie : searchResponse.search()) {
                     if (acumulado.size() >= faltantes) {
+                        break;
+                    }
+                    if (limitReached()) {
                         break;
                     }
                     if (movie == null || movie.title() == null || movie.title().isBlank()) {
@@ -128,6 +143,9 @@ public class FilmeDataInitializer implements CommandLineRunner {
     }
 
     private Optional<OmdbSearchResponse> buscarPagina(String termo, int pagina) {
+        if (!tryConsumeApiCall()) {
+            return Optional.empty();
+        }
         String url = omdbApiUrl + "?s=" + encode(termo) + "&type=movie&page=" + pagina + "&apikey=" + encode(omdbApiKey);
         String payload = restTemplate.getForObject(url, String.class);
         if (payload == null || payload.isBlank()) {
@@ -160,6 +178,9 @@ public class FilmeDataInitializer implements CommandLineRunner {
 
     private Optional<String> buscarDiretor(String imdbId) {
         if (imdbId == null || imdbId.isBlank()) {
+            return Optional.empty();
+        }
+        if (!tryConsumeApiCall()) {
             return Optional.empty();
         }
         String url = omdbApiUrl + "?i=" + encode(imdbId) + "&apikey=" + encode(omdbApiKey);
@@ -200,6 +221,22 @@ public class FilmeDataInitializer implements CommandLineRunner {
 
     private String encode(String valor) {
         return URLEncoder.encode(Optional.ofNullable(valor).orElse(""), StandardCharsets.UTF_8);
+    }
+
+    private synchronized boolean tryConsumeApiCall() {
+        if (apiCalls >= MAX_API_CALLS) {
+            if (!limitLogEmitted) {
+                limitLogEmitted = true;
+                LOGGER.warn("Limite de {} chamadas à OMDb foi atingido. Interrompendo novas requisições.", MAX_API_CALLS);
+            }
+            return false;
+        }
+        apiCalls++;
+        return true;
+    }
+
+    private synchronized boolean limitReached() {
+        return apiCalls >= MAX_API_CALLS;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
