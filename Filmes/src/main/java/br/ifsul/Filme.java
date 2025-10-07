@@ -1,22 +1,36 @@
 package br.ifsul;
-import jakarta.persistence.*;
-import lombok.*;
 
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.ToString;
+
+@Entity
+@Table(name = "filmes")
 @Getter
 @Setter
+@ToString
 @AllArgsConstructor
 @NoArgsConstructor
-@ToString
-@Entity
-@Table(name = "FILME")
 public class Filme {
-	@Id
-    @Column(name = "ID")
-	private Long id;
-    @Column(name = "TITULO")
-	private String titulo;
-    @Column(name = "DIRETOR")
-	private String diretor;
-    @Column(name = "ANO_LANCAMENTO")
-	private String anoLancamento;
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String titulo;
+
+    @Column(nullable = false)
+    private String diretor;
+
+    @Column(name = "ano_lancamento", nullable = false)
+    private String anoLancamento;
 }
