@@ -10,6 +10,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.IntStream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,12 +30,13 @@ public class FilmeDataInitializer implements CommandLineRunner {
     private static final Logger LOGGER = LoggerFactory.getLogger(FilmeDataInitializer.class);
     private static final long TARGET_TOTAL = 1_000L;
     private static final Pattern YEAR_PATTERN = Pattern.compile("(\\d{4})");
+    private static final int MAX_PAGES_PER_QUERY = 4;
     private static final int MAX_API_CALLS = 1_000;
     private static final List<String> SEARCH_TERMS = List.of(
-            "a", "e", "i", "o", "u",
-            "man", "woman", "star", "love", "dark",
-            "night", "day", "war", "world", "king",
-            "girl", "boy", "dead", "life", "time");
+            "avenger", "knight", "shadow", "dream", "legend");
+    private static final List<Integer> YEAR_RANGE = IntStream.rangeClosed(1980, 2023)
+            .boxed()
+            .toList();
 
     private final FilmeRepository filmeRepository;
     private final RestTemplate restTemplate;
@@ -56,6 +58,9 @@ public class FilmeDataInitializer implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
+        apiCalls = 0;
+        limitLogEmitted = false;
+
         long existentes = filmeRepository.count();
         long faltantes = TARGET_TOTAL - existentes;
         if (faltantes <= 0) {
@@ -90,49 +95,53 @@ public class FilmeDataInitializer implements CommandLineRunner {
         List<Filme> acumulado = new ArrayList<>();
         Set<String> chavesUnicas = new HashSet<>();
 
-        for (String termo : SEARCH_TERMS) {
-            if (acumulado.size() >= faltantes) {
+        for (Integer ano : YEAR_RANGE) {
+            if (acumulado.size() >= faltantes || limitReached()) {
                 break;
             }
-            if (limitReached()) {
-                break;
-            }
-            for (int pagina = 1; pagina <= 10 && acumulado.size() < faltantes; pagina++) {
-                if (limitReached()) {
+            for (String termo : SEARCH_TERMS) {
+                if (acumulado.size() >= faltantes || limitReached()) {
                     break;
                 }
-                Optional<OmdbSearchResponse> resposta = buscarPagina(termo, pagina);
-                if (resposta.isEmpty()) {
-                    break;
-                }
-                OmdbSearchResponse searchResponse = resposta.get();
-                if (!searchResponse.isSuccessful() || searchResponse.search() == null) {
-                    break;
-                }
+                for (int pagina = 1; pagina <= MAX_PAGES_PER_QUERY
+                        && acumulado.size() < faltantes
+                        && !limitReached(); pagina++) {
 
-                for (OmdbSearchMovie movie : searchResponse.search()) {
-                    if (acumulado.size() >= faltantes) {
-                        break;
-                    }
-                    if (limitReached()) {
-                        break;
-                    }
-                    if (movie == null || movie.title() == null || movie.title().isBlank()) {
+                    Optional<OmdbSearchResponse> resposta = buscarPagina(termo, ano, pagina);
+                    if (resposta.isEmpty()) {
                         continue;
                     }
-                    String chave = gerarChave(movie.title(), movie.year());
-                    if (!chavesUnicas.add(chave)) {
-                        continue;
+                    OmdbSearchResponse searchResponse = resposta.get();
+                    if (!searchResponse.isSuccessful() || searchResponse.search() == null
+                            || searchResponse.search().isEmpty()) {
+                        if (!searchResponse.isSuccessful() && searchResponse.error() != null) {
+                            LOGGER.debug("Busca OMDb sem sucesso para termo '{}' ano {} página {}: {}",
+                                    termo, ano, pagina, searchResponse.error());
+                        }
+                        break;
                     }
-                    Filme filme = converterParaFilme(movie);
-                    if (filme != null) {
-                        acumulado.add(filme);
-                    }
-                }
 
-                // OMDb devolve no máximo 10 itens por página. Se vier menos, chegou ao fim.
-                if (searchResponse.search().size() < 10) {
-                    break;
+                    for (OmdbSearchMovie movie : searchResponse.search()) {
+                        if (acumulado.size() >= faltantes || limitReached()) {
+                            break;
+                        }
+                        if (movie == null || movie.title() == null || movie.title().isBlank()) {
+                            continue;
+                        }
+                        String chave = gerarChave(movie.title(), movie.year(), ano);
+                        if (!chavesUnicas.add(chave)) {
+                            continue;
+                        }
+                        Filme filme = converterParaFilme(movie, ano);
+                        if (filme != null) {
+                            acumulado.add(filme);
+                        }
+                    }
+
+                    // OMDb devolve no máximo 10 itens por página. Se vier menos, chegou ao fim para esse termo/ano.
+                    if (searchResponse.search().size() < 10) {
+                        break;
+                    }
                 }
             }
         }
@@ -142,32 +151,40 @@ public class FilmeDataInitializer implements CommandLineRunner {
                 : acumulado;
     }
 
-    private Optional<OmdbSearchResponse> buscarPagina(String termo, int pagina) {
+    private Optional<OmdbSearchResponse> buscarPagina(String termo, Integer ano, int pagina) {
         if (!tryConsumeApiCall()) {
             return Optional.empty();
         }
-        String url = omdbApiUrl + "?s=" + encode(termo) + "&type=movie&page=" + pagina + "&apikey=" + encode(omdbApiKey);
-        String payload = restTemplate.getForObject(url, String.class);
+        StringBuilder url = new StringBuilder(omdbApiUrl)
+                .append("?s=").append(encode(termo))
+                .append("&type=movie")
+                .append("&page=").append(pagina)
+                .append("&apikey=").append(encode(omdbApiKey));
+        if (ano != null) {
+            url.append("&y=").append(ano);
+        }
+        String payload = restTemplate.getForObject(url.toString(), String.class);
         if (payload == null || payload.isBlank()) {
-            LOGGER.debug("Resposta vazia para termo '{}' página {}.", termo, pagina);
+            LOGGER.debug("Resposta vazia para termo '{}' ano {} página {}.", termo, ano, pagina);
             return Optional.empty();
         }
         try {
             return Optional.of(objectMapper.readValue(payload, OmdbSearchResponse.class));
         } catch (IOException e) {
-            LOGGER.warn("Falha ao processar resposta da OMDb para termo '{}' página {}: {}", termo, pagina,
+            LOGGER.warn("Falha ao processar resposta da OMDb para termo '{}' ano {} página {}: {}", termo, ano, pagina,
                     e.getMessage());
             return Optional.empty();
         }
     }
 
-    private Filme converterParaFilme(OmdbSearchMovie movie) {
+    private Filme converterParaFilme(OmdbSearchMovie movie, Integer anoConsulta) {
         String titulo = movie.title().trim();
         if (titulo.isBlank()) {
             return null;
         }
 
-        String ano = extrairAno(movie.year());
+        String ano = Optional.ofNullable(extrairAno(movie.year()))
+                .orElseGet(() -> anoConsulta != null ? anoConsulta.toString() : null);
         if (ano == null) {
             ano = "Não informado";
         }
@@ -203,8 +220,9 @@ public class FilmeDataInitializer implements CommandLineRunner {
         }
     }
 
-    private String gerarChave(String titulo, String anoBruto) {
-        String ano = Optional.ofNullable(extrairAno(anoBruto)).orElse("?");
+    private String gerarChave(String titulo, String anoBruto, Integer anoFallback) {
+        String ano = Optional.ofNullable(extrairAno(anoBruto))
+                .orElseGet(() -> anoFallback != null ? anoFallback.toString() : "?");
         return titulo.trim().toLowerCase() + "|" + ano;
     }
 
