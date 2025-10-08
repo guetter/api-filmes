@@ -50,17 +50,22 @@ public class FilmeDataInitializer implements CommandLineRunner {
 
     private List<Filme> buscarFilmes() throws IOException {
         List<Filme> filmes = new ArrayList<>();
+        int totalPaginas = 10;
         
-        String url = omdbApiUrl + "?s=movie&type=movie&page=1&apikey=" + encode(omdbApiKey);
-        String payload = restTemplate.getForObject(url, String.class);
-        
-        if (payload == null || payload.isBlank()) {
-            return filmes;
-        }
+        for (int pagina = 1; pagina <= totalPaginas; pagina++) {
+            String url = omdbApiUrl + "?s=movie&type=movie&page=" + pagina + "&apikey=" + encode(omdbApiKey);
+            String payload = restTemplate.getForObject(url, String.class);
+            
+            if (payload == null || payload.isBlank()) {
+                break;
+            }
 
-        OmdbSearchResponse response = objectMapper.readValue(payload, OmdbSearchResponse.class);
-        
-        if (response.search() != null) {
+            OmdbSearchResponse response = objectMapper.readValue(payload, OmdbSearchResponse.class);
+            
+            if (response.search() == null || response.search().isEmpty()) {
+                break;
+            }
+            
             for (OmdbSearchMovie movie : response.search()) {
                 if (movie.title() != null && !movie.title().isBlank()) {
                     String diretor = buscarDiretor(movie.imdbId());
