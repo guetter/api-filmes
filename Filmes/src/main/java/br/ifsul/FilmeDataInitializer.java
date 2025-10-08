@@ -4,20 +4,11 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Optional;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.IntStream;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
@@ -27,22 +18,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Component
 public class FilmeDataInitializer implements CommandLineRunner {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(FilmeDataInitializer.class);
-    private static final long TARGET_TOTAL = 1_000L;
-    private static final Pattern YEAR_PATTERN = Pattern.compile("(\\d{4})");
-    private static final int MAX_PAGES_PER_QUERY = 4;
-    private static final int MAX_API_CALLS = 1_000;
-    private static final List<String> SEARCH_TERMS = List.of(
-            "avenger", "knight", "shadow", "dream", "legend");
-    private static final List<Integer> YEAR_RANGE = IntStream.rangeClosed(1980, 2023)
-            .boxed()
-            .toList();
-
     private final FilmeRepository filmeRepository;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
-    private int apiCalls = 0;
-    private boolean limitLogEmitted = false;
 
     @Value("${omdb.api.url:https://www.omdbapi.com/}")
     private String omdbApiUrl;
@@ -57,235 +35,84 @@ public class FilmeDataInitializer implements CommandLineRunner {
     }
 
     @Override
-    public void run(String... args) {
-        apiCalls = 0;
-        limitLogEmitted = false;
-
-        long existentes = filmeRepository.count();
-        long faltantes = TARGET_TOTAL - existentes;
-        if (faltantes <= 0) {
-            LOGGER.debug("Filmes já possuem {} registros. Nenhuma importação necessária.", existentes);
+    public void run(String... args) throws IOException {
+        if (filmeRepository.count() > 0) {
             return;
         }
 
         if (omdbApiKey == null || omdbApiKey.isBlank()) {
-            LOGGER.warn("Chave da API OMDb não configurada. Importação automática ignorada.");
             return;
         }
 
-        try {
-            List<Filme> novosFilmes = importarFilmesOmdb(faltantes);
-            if (novosFilmes.isEmpty()) {
-                LOGGER.warn("Nenhum filme válido encontrado durante a importação OMDb.");
-                return;
-            }
-
-            filmeRepository.saveAll(novosFilmes);
-            LOGGER.info("Importados {} filmes da OMDb API. Total atual: {}", novosFilmes.size(),
-                    filmeRepository.count());
-            if (limitReached()) {
-                LOGGER.warn("Limite de {} chamadas à OMDb atingido durante a importação.", MAX_API_CALLS);
-            }
-        } catch (RestClientException | IOException e) {
-            LOGGER.error("Falha ao importar filmes da OMDb API: {}", e.getMessage(), e);
-        }
+        List<Filme> filmes = buscarFilmes();
+        filmeRepository.saveAll(filmes);
     }
 
-    private List<Filme> importarFilmesOmdb(long faltantes) throws IOException {
-        List<Filme> acumulado = new ArrayList<>();
-        Set<String> chavesUnicas = new HashSet<>();
-
-        for (Integer ano : YEAR_RANGE) {
-            if (acumulado.size() >= faltantes || limitReached()) {
-                break;
-            }
-            for (String termo : SEARCH_TERMS) {
-                if (acumulado.size() >= faltantes || limitReached()) {
-                    break;
-                }
-                for (int pagina = 1; pagina <= MAX_PAGES_PER_QUERY
-                        && acumulado.size() < faltantes
-                        && !limitReached(); pagina++) {
-
-                    Optional<OmdbSearchResponse> resposta = buscarPagina(termo, ano, pagina);
-                    if (resposta.isEmpty()) {
-                        continue;
-                    }
-                    OmdbSearchResponse searchResponse = resposta.get();
-                    if (!searchResponse.isSuccessful() || searchResponse.search() == null
-                            || searchResponse.search().isEmpty()) {
-                        if (!searchResponse.isSuccessful() && searchResponse.error() != null) {
-                            LOGGER.debug("Busca OMDb sem sucesso para termo '{}' ano {} página {}: {}",
-                                    termo, ano, pagina, searchResponse.error());
-                        }
-                        break;
-                    }
-
-                    for (OmdbSearchMovie movie : searchResponse.search()) {
-                        if (acumulado.size() >= faltantes || limitReached()) {
-                            break;
-                        }
-                        if (movie == null || movie.title() == null || movie.title().isBlank()) {
-                            continue;
-                        }
-                        String chave = gerarChave(movie.title(), movie.year(), ano);
-                        if (!chavesUnicas.add(chave)) {
-                            continue;
-                        }
-                        Filme filme = converterParaFilme(movie, ano);
-                        if (filme != null) {
-                            acumulado.add(filme);
-                        }
-                    }
-
-                    // OMDb devolve no máximo 10 itens por página. Se vier menos, chegou ao fim para esse termo/ano.
-                    if (searchResponse.search().size() < 10) {
-                        break;
-                    }
-                }
-            }
-        }
-
-        return acumulado.size() > faltantes
-                ? new ArrayList<>(acumulado.subList(0, (int) faltantes))
-                : acumulado;
-    }
-
-    private Optional<OmdbSearchResponse> buscarPagina(String termo, Integer ano, int pagina) {
-        if (!tryConsumeApiCall()) {
-            return Optional.empty();
-        }
-        StringBuilder url = new StringBuilder(omdbApiUrl)
-                .append("?s=").append(encode(termo))
-                .append("&type=movie")
-                .append("&page=").append(pagina)
-                .append("&apikey=").append(encode(omdbApiKey));
-        if (ano != null) {
-            url.append("&y=").append(ano);
-        }
-        String payload = restTemplate.getForObject(url.toString(), String.class);
+    private List<Filme> buscarFilmes() throws IOException {
+        List<Filme> filmes = new ArrayList<>();
+        
+        String url = omdbApiUrl + "?s=movie&type=movie&page=1&apikey=" + encode(omdbApiKey);
+        String payload = restTemplate.getForObject(url, String.class);
+        
         if (payload == null || payload.isBlank()) {
-            LOGGER.debug("Resposta vazia para termo '{}' ano {} página {}.", termo, ano, pagina);
-            return Optional.empty();
+            return filmes;
         }
-        try {
-            return Optional.of(objectMapper.readValue(payload, OmdbSearchResponse.class));
-        } catch (IOException e) {
-            LOGGER.warn("Falha ao processar resposta da OMDb para termo '{}' ano {} página {}: {}", termo, ano, pagina,
-                    e.getMessage());
-            return Optional.empty();
+
+        OmdbSearchResponse response = objectMapper.readValue(payload, OmdbSearchResponse.class);
+        
+        if (response.search() != null) {
+            for (OmdbSearchMovie movie : response.search()) {
+                if (movie.title() != null && !movie.title().isBlank()) {
+                    String diretor = buscarDiretor(movie.imdbId());
+                    Filme filme = new Filme(null, movie.title(), diretor, movie.year());
+                    filmes.add(filme);
+                }
+            }
         }
+        
+        return filmes;
     }
 
-    private Filme converterParaFilme(OmdbSearchMovie movie, Integer anoConsulta) {
-        String titulo = movie.title().trim();
-        if (titulo.isBlank()) {
-            return null;
-        }
-
-        String ano = Optional.ofNullable(extrairAno(movie.year()))
-                .orElseGet(() -> anoConsulta != null ? anoConsulta.toString() : null);
-        if (ano == null) {
-            ano = "Não informado";
-        }
-
-        String diretor = buscarDiretor(movie.imdbId()).orElse("Diretor desconhecido");
-        return new Filme(null, titulo, diretor, ano);
-    }
-
-    private Optional<String> buscarDiretor(String imdbId) {
+    private String buscarDiretor(String imdbId) {
         if (imdbId == null || imdbId.isBlank()) {
-            return Optional.empty();
+            return "Desconhecido";
         }
-        if (!tryConsumeApiCall()) {
-            return Optional.empty();
-        }
-        String url = omdbApiUrl + "?i=" + encode(imdbId) + "&apikey=" + encode(omdbApiKey);
+        
         try {
+            String url = omdbApiUrl + "?i=" + encode(imdbId) + "&apikey=" + encode(omdbApiKey);
             String payload = restTemplate.getForObject(url, String.class);
-            if (payload == null || payload.isBlank()) {
-                return Optional.empty();
+            
+            if (payload != null && !payload.isBlank()) {
+                OmdbDetailResponse detail = objectMapper.readValue(payload, OmdbDetailResponse.class);
+                if (detail.director() != null && !detail.director().isBlank() && !"N/A".equals(detail.director())) {
+                    return detail.director();
+                }
             }
-            OmdbDetailResponse detail = objectMapper.readValue(payload, OmdbDetailResponse.class);
-            if (!detail.isSuccessful()) {
-                return Optional.empty();
-            }
-            return Optional.ofNullable(detail.director())
-                    .filter(value -> !value.isBlank())
-                    .filter(value -> !"N/A".equalsIgnoreCase(value))
-                    .map(String::trim);
-        } catch (IOException | RestClientException e) {
-            LOGGER.debug("Falha ao consultar detalhes para imdbId {}: {}", imdbId, e.getMessage());
-            return Optional.empty();
+        } catch (Exception e) {
+            // Ignora erro e retorna padrão
         }
-    }
-
-    private String gerarChave(String titulo, String anoBruto, Integer anoFallback) {
-        String ano = Optional.ofNullable(extrairAno(anoBruto))
-                .orElseGet(() -> anoFallback != null ? anoFallback.toString() : "?");
-        return titulo.trim().toLowerCase() + "|" + ano;
-    }
-
-    private String extrairAno(String valor) {
-        if (valor == null) {
-            return null;
-        }
-        Matcher matcher = YEAR_PATTERN.matcher(valor);
-        if (matcher.find()) {
-            return matcher.group(1);
-        }
-        return null;
+        
+        return "Desconhecido";
     }
 
     private String encode(String valor) {
-        return URLEncoder.encode(Optional.ofNullable(valor).orElse(""), StandardCharsets.UTF_8);
-    }
-
-    private synchronized boolean tryConsumeApiCall() {
-        if (apiCalls >= MAX_API_CALLS) {
-            if (!limitLogEmitted) {
-                limitLogEmitted = true;
-                LOGGER.warn("Limite de {} chamadas à OMDb foi atingido. Interrompendo novas requisições.", MAX_API_CALLS);
-            }
-            return false;
-        }
-        apiCalls++;
-        return true;
-    }
-
-    private synchronized boolean limitReached() {
-        return apiCalls >= MAX_API_CALLS;
+        return URLEncoder.encode(valor != null ? valor : "", StandardCharsets.UTF_8);
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     private record OmdbSearchResponse(
-            @JsonProperty("Search") List<OmdbSearchMovie> search,
-            @JsonProperty("totalResults") String totalResults,
-            @JsonProperty("Response") String response,
-            @JsonProperty("Error") String error) {
-
-        boolean isSuccessful() {
-            return "True".equalsIgnoreCase(response);
-        }
+            @JsonProperty("Search") List<OmdbSearchMovie> search) {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     private record OmdbSearchMovie(
             @JsonProperty("Title") String title,
             @JsonProperty("Year") String year,
-            @JsonProperty("imdbID") String imdbId,
-            @JsonProperty("Type") String type) {
+            @JsonProperty("imdbID") String imdbId) {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     private record OmdbDetailResponse(
-            @JsonProperty("Title") String title,
-            @JsonProperty("Year") String year,
-            @JsonProperty("Director") String director,
-            @JsonProperty("Response") String response) {
-
-        boolean isSuccessful() {
-            return "True".equalsIgnoreCase(response);
-        }
+            @JsonProperty("Director") String director) {
     }
 }
